@@ -8,7 +8,7 @@ from google.oauth2 import service_account
 # ==========================================
 # CONFIGURATION
 # ==========================================
-BUCKET_NAME = 'venice_singlepages' # Your bucket
+BUCKET_NAME = 'venice_singlepages_37' # Your bucket
 BUCKET_PREFIX = "" # Folder prefix if applicable
 CSV_FILENAME = 'detailed_page_analysis.csv' # The file to edit
 
