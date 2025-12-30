@@ -1,7 +1,14 @@
 # Verifier App for Annotated 39 Images
 
-## Summary data for the 39 images
+To use the app to verify data, do the following:
 
+1. Go to venice-verifier.streamlit.app
+2. When the app loads it will ask you to add your gcs_key (drag it into the left sidebar)
+3. Make any notes in the notes field.
+4. Check the box at the top when the data is verified/completed
+5. Save the revised data to Google Cloud by clicking the button at the bottom.
+
+## Summary data for the 39 images
 
 --- DATE AND COLUMNS ---
 - Pages with dates: 28
