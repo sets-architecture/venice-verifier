@@ -1,6 +1,8 @@
 import pandas as pd
 import json
 import os
+import numpy as np
+from sklearn.cluster import KMeans
 
 def parse_bounding_boxes(bbox_string):
     """Parse the bounding box JSON string and return list of boxes with labels."""
@@ -12,30 +14,122 @@ def parse_bounding_boxes(bbox_string):
     except (json.JSONDecodeError, TypeError):
         return []
 
-def calculate_side(x, width, original_width):
+def calculate_side_simple(x, width):
     """
-    Calculate if a bounding box is on the left or right side of the image.
-    Uses the center point of the bounding box.
+    Simple calculation: if center is on left or right half.
     """
-    # x is in percentage, convert to actual position
     center_x = x + (width / 2)
-    
-    # If center is less than 50%, it's on the left
     return "left" if center_x < 50 else "right"
 
-def count_labels_by_side(boxes):
-    """Count how many labels appear on left vs right side."""
+def calculate_side_clustering(boxes, label_filter=None):
+    """
+    Use clustering to identify left and right columns based on x-coordinates.
+    This works better for off-center documents.
+    
+    Args:
+        boxes: List of bounding box dictionaries
+        label_filter: Optional label type to filter (e.g., "Traveler Name")
+    
+    Returns:
+        Dictionary mapping box index to 'left' or 'right'
+    """
+    if not boxes:
+        return {}
+    
+    # Filter boxes by label if specified
+    filtered_boxes = []
+    filtered_indices = []
+    for i, box in enumerate(boxes):
+        if label_filter:
+            if 'rectanglelabels' in box and label_filter in box['rectanglelabels']:
+                filtered_boxes.append(box)
+                filtered_indices.append(i)
+        else:
+            filtered_boxes.append(box)
+            filtered_indices.append(i)
+    
+    if len(filtered_boxes) < 2:
+        # Not enough boxes to cluster, use simple method
+        return {i: calculate_side_simple(box['x'], box['width']) 
+                for i, box in enumerate(boxes) if 'x' in box and 'width' in box}
+    
+    # Extract x-coordinates (use left edge of box)
+    x_coords = []
+    valid_indices = []
+    for i, box in zip(filtered_indices, filtered_boxes):
+        if 'x' in box:
+            x_coords.append(box['x'])
+            valid_indices.append(i)
+    
+    if len(x_coords) < 2:
+        return {i: calculate_side_simple(box['x'], box['width']) 
+                for i, box in enumerate(boxes) if 'x' in box and 'width' in box}
+    
+    # Check if there are actually two distinct columns
+    # Calculate the gap between sorted x values
+    sorted_x = sorted(x_coords)
+    gaps = [sorted_x[i+1] - sorted_x[i] for i in range(len(sorted_x)-1)]
+    
+    # If there's a significant gap (suggesting two columns), use clustering
+    max_gap = max(gaps) if gaps else 0
+    mean_gap = np.mean(gaps) if gaps else 0
+    
+    if max_gap > mean_gap * 2 and max_gap > 5:  # Threshold for detecting two columns
+        # Use K-means clustering with k=2
+        X = np.array(x_coords).reshape(-1, 1)
+        kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
+        clusters = kmeans.fit_predict(X)
+        
+        # Determine which cluster is left and which is right
+        cluster_centers = kmeans.cluster_centers_.flatten()
+        left_cluster = 0 if cluster_centers[0] < cluster_centers[1] else 1
+        
+        # Create mapping
+        side_mapping = {}
+        for idx, cluster in zip(valid_indices, clusters):
+            side_mapping[idx] = "left" if cluster == left_cluster else "right"
+        
+        # Fill in any boxes that weren't clustered (non-name boxes) with simple method
+        for i, box in enumerate(boxes):
+            if i not in side_mapping and 'x' in box and 'width' in box:
+                side_mapping[i] = calculate_side_simple(box['x'], box['width'])
+        
+        return side_mapping
+    else:
+        # All boxes are in one column or too close together, use simple method
+        return {i: calculate_side_simple(box['x'], box['width']) 
+                for i, box in enumerate(boxes) if 'x' in box and 'width' in box}
+
+def count_labels_by_side(boxes, use_clustering=False, label_filter=None):
+    """
+    Count how many labels appear on left vs right side.
+    
+    Args:
+        boxes: List of bounding box dictionaries
+        use_clustering: If True, use clustering method; if False, use simple 50% method
+        label_filter: Optional label type to filter for clustering
+    """
+    if not boxes:
+        return 0, 0
+    
     left_count = 0
     right_count = 0
     
-    for box in boxes:
-        if 'x' in box and 'width' in box:
-            side = calculate_side(box['x'], box['width'], 
-                                 box.get('original_width', 3024))
-            if side == "left":
+    if use_clustering:
+        side_mapping = calculate_side_clustering(boxes, label_filter)
+        for i in side_mapping:
+            if side_mapping[i] == "left":
                 left_count += 1
             else:
                 right_count += 1
+    else:
+        for box in boxes:
+            if 'x' in box and 'width' in box:
+                side = calculate_side_simple(box['x'], box['width'])
+                if side == "left":
+                    left_count += 1
+                else:
+                    right_count += 1
     
     return left_count, right_count
 
@@ -53,6 +147,29 @@ def strip_gs_prefix(image_path):
     if image_path.startswith(prefix):
         return image_path[len(prefix):]
     return image_path
+
+def analyze_column_distribution(boxes, label_filter=None):
+    """
+    Analyze and print the distribution of x-coordinates to help debug column detection.
+    """
+    if label_filter:
+        x_coords = [box['x'] for box in boxes 
+                   if 'x' in box and 'rectanglelabels' in box 
+                   and label_filter in box['rectanglelabels']]
+    else:
+        x_coords = [box['x'] for box in boxes if 'x' in box]
+    
+    if not x_coords:
+        return None
+    
+    sorted_x = sorted(x_coords)
+    return {
+        'min': min(sorted_x),
+        'max': max(sorted_x),
+        'mean': np.mean(sorted_x),
+        'median': np.median(sorted_x),
+        'values': sorted_x
+    }
 
 def process_annotations(csv_files):
     """
@@ -99,28 +216,28 @@ def process_annotations(csv_files):
                 image_data['date'] = row.iloc[0]['date']
                 image_data['has_columns'] = row.iloc[0]['columns']
         
-        # Process archivist-mark and signature
+        # Process archivist-mark and signature (use simple method)
         if 'archivist_mark' in dataframes:
             df = dataframes['archivist_mark']
             row = df[df['image'] == image]
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['label'])
                 labels = extract_label_types(boxes)
-                left, right = count_labels_by_side(boxes)
+                left, right = count_labels_by_side(boxes, use_clustering=False)
                 
                 image_data['archivist_signature_count'] = len(boxes)
                 image_data['archivist_signature_left'] = left
                 image_data['archivist_signature_right'] = right
                 image_data['archivist_signature_types'] = ', '.join(set(labels))
         
-        # Process con-and-e
+        # Process con-and-e (use simple method)
         if 'con_e' in dataframes:
             df = dataframes['con_e']
             row = df[df['image'] == image]
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['con-e-ed'])
                 labels = extract_label_types(boxes)
-                left, right = count_labels_by_side(boxes)
+                left, right = count_labels_by_side(boxes, use_clustering=False)
                 
                 image_data['con_e_count'] = len(boxes)
                 image_data['con_e_left'] = left
@@ -137,14 +254,14 @@ def process_annotations(csv_files):
                         except:
                             image_data['con_e_text_labels'] = str(text_data)
         
-        # Process curly brackets
+        # Process curly brackets (use simple method)
         if 'brackets' in dataframes:
             df = dataframes['brackets']
             row = df[df['image'] == image]
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['entities'])
                 labels = extract_label_types(boxes)
-                left, right = count_labels_by_side(boxes)
+                left, right = count_labels_by_side(boxes, use_clustering=False)
                 
                 image_data['bracket_count'] = len(boxes)
                 image_data['bracket_left'] = left
@@ -152,28 +269,38 @@ def process_annotations(csv_files):
                 image_data['bracket_types'] = ', '.join(set(labels))
                 image_data['bracket_text'] = row.iloc[0]['bracket_annotation_text']
         
-        # Process named travelers
+        # Process named travelers (USE CLUSTERING METHOD)
         if 'travelers' in dataframes:
             df = dataframes['travelers']
             row = df[df['image'] == image]
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['named travelers - origin'])
                 labels = extract_label_types(boxes)
-                left, right = count_labels_by_side(boxes)
+                
+                # Use clustering method specifically for traveler names
+                left, right = count_labels_by_side(boxes, use_clustering=True, 
+                                                   label_filter="Traveler Name")
                 
                 image_data['traveler_count'] = len(boxes)
                 image_data['traveler_left'] = left
                 image_data['traveler_right'] = right
                 image_data['traveler_label_types'] = ', '.join(set(labels))
+                
+                # Store x-coordinate distribution for debugging
+                dist = analyze_column_distribution(boxes, "Traveler Name")
+                if dist:
+                    image_data['traveler_x_min'] = dist['min']
+                    image_data['traveler_x_max'] = dist['max']
+                    image_data['traveler_x_mean'] = dist['mean']
         
-        # Process quondam
+        # Process quondam (use simple method)
         if 'quondam' in dataframes:
             df = dataframes['quondam']
             row = df[df['image'] == image]
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['quondam instances'])
                 labels = extract_label_types(boxes)
-                left, right = count_labels_by_side(boxes)
+                left, right = count_labels_by_side(boxes, use_clustering=False)
                 
                 image_data['quondam_count'] = len(boxes)
                 image_data['quondam_left'] = left
@@ -234,6 +361,16 @@ if __name__ == "__main__":
     for img in result['image'].head(3):
         print(f"  {img}")
     
+    # Show traveler x-coordinate distribution for debugging
+    print("\n" + "="*80)
+    print("TRAVELER NAME X-COORDINATE DISTRIBUTION (sample)")
+    print("="*80)
+    traveler_cols = ['image', 'traveler_count', 'traveler_left', 'traveler_right', 
+                     'traveler_x_min', 'traveler_x_max', 'traveler_x_mean']
+    available_cols = [col for col in traveler_cols if col in result.columns]
+    if available_cols:
+        print(result[available_cols].head(5).to_string())
+    
     # Save to CSV
     output_file = 'aggregated_annotations.csv'
     result.to_csv(output_file, index=False)
@@ -250,7 +387,8 @@ if __name__ == "__main__":
         if left_col in result.columns and right_col in result.columns:
             total_left = result[left_col].sum()
             total_right = result[right_col].sum()
-            print(f"\n{prefix.replace('_', ' ').title()}:")
+            method = "CLUSTERING" if prefix == 'traveler' else "SIMPLE (50%)"
+            print(f"\n{prefix.replace('_', ' ').title()} [{method}]:")
             print(f"  Left side:  {total_left}")
             print(f"  Right side: {total_right}")
             if total_left + total_right > 0:
