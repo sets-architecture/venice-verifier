@@ -10,50 +10,44 @@ To use the app to verify data, do the following:
 
 ## Summary data for the 39 images
 
-### --- DATE AND COLUMNS ---
+--- DATE AND COLUMNS ---
 - Pages with dates: 28
 - Pages with two columns: 39
 
-### --- SIGNATURES AND MARKS ---
+--- SIGNATURES AND MARKS ---
 - Pages that are signed: 13
-- Total signatures: 13
 - Pages with top-left archivist mark: 19
 - Total archivist marks: 54
 
-### --- QUONDAM ---
+--- QUONDAM ---
 - Total quondam instances: 151
   - Left column: 93
   - Right column: 58
-- Total names after quondam: 156
 
-### --- CON AND E (SEPARATED) ---
+--- CON AND E ---
 - Total 'con' instances: 222
   - Left column: 142
   - Right column: 80
-  - Text entries after 'con': 216
 - Total 'e' conjunction instances: 37
   - Left column: 24
   - Right column: 13
-  - Text entries after 'e': 37
 
-### --- TRAVELERS ---
+--- TRAVELERS ---
 - Total named travelers: 919
   - Left column: 562
   - Right column: 357
-- Total unnamed travelers: 402
-  - Left column: 272
-  - Right column: 130
-- Total places of origin: 689
+- Total unnamed travelers: 388
+  - Left column: 264
+  - Right column: 124
+- - Total places of origin: 689
   - Left column: 420
   - Right column: 269
-- Total places of stay: 576
+Total places of stay: 576
   - Left column: 320
   - Right column: 256
 
-### --- BRACKETS ---
+--- BRACKETS ---
 - Total brackets: 144
   - Left column: 89
   - Right column: 55
 - Brackets with annotations: 34
-- Total bracket annotations: 143
-- Total contained by bracket: 144
