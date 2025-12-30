@@ -1,8 +1,6 @@
 import pandas as pd
 import json
 import os
-import numpy as np
-from sklearn.cluster import KMeans
 
 def parse_bounding_boxes(bbox_string):
     """Parse the bounding box JSON string and return list of boxes with labels."""
@@ -21,10 +19,10 @@ def calculate_side_simple(x, width):
     center_x = x + (width / 2)
     return "left" if center_x < 50 else "right"
 
-def calculate_side_clustering(boxes, label_filter=None):
+def calculate_side_gap_detection(boxes, label_filter=None):
     """
-    Use clustering to identify left and right columns based on x-coordinates.
-    This works better for off-center documents.
+    Use gap detection to identify left and right columns based on x-coordinates.
+    This works better for off-center documents without needing sklearn.
     
     Args:
         boxes: List of bounding box dictionaries
@@ -37,59 +35,49 @@ def calculate_side_clustering(boxes, label_filter=None):
         return {}
     
     # Filter boxes by label if specified
-    filtered_boxes = []
-    filtered_indices = []
+    filtered_data = []
     for i, box in enumerate(boxes):
+        if 'x' not in box:
+            continue
         if label_filter:
             if 'rectanglelabels' in box and label_filter in box['rectanglelabels']:
-                filtered_boxes.append(box)
-                filtered_indices.append(i)
+                filtered_data.append((i, box['x']))
         else:
-            filtered_boxes.append(box)
-            filtered_indices.append(i)
+            filtered_data.append((i, box['x']))
     
-    if len(filtered_boxes) < 2:
-        # Not enough boxes to cluster, use simple method
+    if len(filtered_data) < 2:
+        # Not enough boxes to detect columns, use simple method
         return {i: calculate_side_simple(box['x'], box['width']) 
                 for i, box in enumerate(boxes) if 'x' in box and 'width' in box}
     
-    # Extract x-coordinates (use left edge of box)
-    x_coords = []
-    valid_indices = []
-    for i, box in zip(filtered_indices, filtered_boxes):
-        if 'x' in box:
-            x_coords.append(box['x'])
-            valid_indices.append(i)
+    # Sort by x-coordinate
+    filtered_data.sort(key=lambda x: x[1])
+    indices, x_coords = zip(*filtered_data)
     
-    if len(x_coords) < 2:
-        return {i: calculate_side_simple(box['x'], box['width']) 
-                for i, box in enumerate(boxes) if 'x' in box and 'width' in box}
+    # Find the largest gap between consecutive x values
+    max_gap = 0
+    gap_index = 0
+    for i in range(len(x_coords) - 1):
+        gap = x_coords[i + 1] - x_coords[i]
+        if gap > max_gap:
+            max_gap = gap
+            gap_index = i
     
-    # Check if there are actually two distinct columns
-    # Calculate the gap between sorted x values
-    sorted_x = sorted(x_coords)
-    gaps = [sorted_x[i+1] - sorted_x[i] for i in range(len(sorted_x)-1)]
+    # Calculate mean gap (excluding the max gap)
+    gaps = [x_coords[i + 1] - x_coords[i] for i in range(len(x_coords) - 1)]
+    gaps_without_max = [g for g in gaps if g != max_gap]
+    mean_gap = sum(gaps_without_max) / len(gaps_without_max) if gaps_without_max else 0
     
-    # If there's a significant gap (suggesting two columns), use clustering
-    max_gap = max(gaps) if gaps else 0
-    mean_gap = np.mean(gaps) if gaps else 0
-    
-    if max_gap > mean_gap * 2 and max_gap > 5:  # Threshold for detecting two columns
-        # Use K-means clustering with k=2
-        X = np.array(x_coords).reshape(-1, 1)
-        kmeans = KMeans(n_clusters=2, random_state=42, n_init=10)
-        clusters = kmeans.fit_predict(X)
+    # If the max gap is significantly larger than the mean, we have two columns
+    if max_gap > mean_gap * 2 and max_gap > 5:
+        # Split into two groups at the gap
+        threshold = (x_coords[gap_index] + x_coords[gap_index + 1]) / 2
         
-        # Determine which cluster is left and which is right
-        cluster_centers = kmeans.cluster_centers_.flatten()
-        left_cluster = 0 if cluster_centers[0] < cluster_centers[1] else 1
-        
-        # Create mapping
         side_mapping = {}
-        for idx, cluster in zip(valid_indices, clusters):
-            side_mapping[idx] = "left" if cluster == left_cluster else "right"
+        for idx, x in zip(indices, x_coords):
+            side_mapping[idx] = "left" if x < threshold else "right"
         
-        # Fill in any boxes that weren't clustered (non-name boxes) with simple method
+        # Fill in any boxes that weren't included (non-name boxes) with simple method
         for i, box in enumerate(boxes):
             if i not in side_mapping and 'x' in box and 'width' in box:
                 side_mapping[i] = calculate_side_simple(box['x'], box['width'])
@@ -100,14 +88,14 @@ def calculate_side_clustering(boxes, label_filter=None):
         return {i: calculate_side_simple(box['x'], box['width']) 
                 for i, box in enumerate(boxes) if 'x' in box and 'width' in box}
 
-def count_labels_by_side(boxes, use_clustering=False, label_filter=None):
+def count_labels_by_side(boxes, use_gap_detection=False, label_filter=None):
     """
     Count how many labels appear on left vs right side.
     
     Args:
         boxes: List of bounding box dictionaries
-        use_clustering: If True, use clustering method; if False, use simple 50% method
-        label_filter: Optional label type to filter for clustering
+        use_gap_detection: If True, use gap detection method; if False, use simple 50% method
+        label_filter: Optional label type to filter for gap detection
     """
     if not boxes:
         return 0, 0
@@ -115,8 +103,8 @@ def count_labels_by_side(boxes, use_clustering=False, label_filter=None):
     left_count = 0
     right_count = 0
     
-    if use_clustering:
-        side_mapping = calculate_side_clustering(boxes, label_filter)
+    if use_gap_detection:
+        side_mapping = calculate_side_gap_detection(boxes, label_filter)
         for i in side_mapping:
             if side_mapping[i] == "left":
                 left_count += 1
@@ -166,8 +154,8 @@ def analyze_column_distribution(boxes, label_filter=None):
     return {
         'min': min(sorted_x),
         'max': max(sorted_x),
-        'mean': np.mean(sorted_x),
-        'median': np.median(sorted_x),
+        'mean': sum(sorted_x) / len(sorted_x),
+        'median': sorted_x[len(sorted_x)//2],
         'values': sorted_x
     }
 
@@ -204,7 +192,7 @@ def process_annotations(csv_files):
     
     for image in images:
         image_data = {
-            'image': image,
+            'Page_ID': image,  # Changed from 'image' to 'Page_ID' for verifier app
             'image_filename': os.path.basename(image)
         }
         
@@ -223,7 +211,7 @@ def process_annotations(csv_files):
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['label'])
                 labels = extract_label_types(boxes)
-                left, right = count_labels_by_side(boxes, use_clustering=False)
+                left, right = count_labels_by_side(boxes, use_gap_detection=False)
                 
                 image_data['archivist_signature_count'] = len(boxes)
                 image_data['archivist_signature_left'] = left
@@ -237,7 +225,7 @@ def process_annotations(csv_files):
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['con-e-ed'])
                 labels = extract_label_types(boxes)
-                left, right = count_labels_by_side(boxes, use_clustering=False)
+                left, right = count_labels_by_side(boxes, use_gap_detection=False)
                 
                 image_data['con_e_count'] = len(boxes)
                 image_data['con_e_left'] = left
@@ -261,7 +249,7 @@ def process_annotations(csv_files):
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['entities'])
                 labels = extract_label_types(boxes)
-                left, right = count_labels_by_side(boxes, use_clustering=False)
+                left, right = count_labels_by_side(boxes, use_gap_detection=False)
                 
                 image_data['bracket_count'] = len(boxes)
                 image_data['bracket_left'] = left
@@ -269,7 +257,7 @@ def process_annotations(csv_files):
                 image_data['bracket_types'] = ', '.join(set(labels))
                 image_data['bracket_text'] = row.iloc[0]['bracket_annotation_text']
         
-        # Process named travelers (USE CLUSTERING METHOD)
+        # Process named travelers (USE GAP DETECTION METHOD)
         if 'travelers' in dataframes:
             df = dataframes['travelers']
             row = df[df['image'] == image]
@@ -277,8 +265,8 @@ def process_annotations(csv_files):
                 boxes = parse_bounding_boxes(row.iloc[0]['named travelers - origin'])
                 labels = extract_label_types(boxes)
                 
-                # Use clustering method specifically for traveler names
-                left, right = count_labels_by_side(boxes, use_clustering=True, 
+                # Use gap detection method specifically for traveler names
+                left, right = count_labels_by_side(boxes, use_gap_detection=True, 
                                                    label_filter="Traveler Name")
                 
                 image_data['traveler_count'] = len(boxes)
@@ -300,7 +288,7 @@ def process_annotations(csv_files):
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['quondam instances'])
                 labels = extract_label_types(boxes)
-                left, right = count_labels_by_side(boxes, use_clustering=False)
+                left, right = count_labels_by_side(boxes, use_gap_detection=False)
                 
                 image_data['quondam_count'] = len(boxes)
                 image_data['quondam_left'] = left
@@ -354,18 +342,11 @@ if __name__ == "__main__":
     print("="*80)
     print(result.head(2).to_string())
     
-    # Show example of stripped image paths
-    print("\n" + "="*80)
-    print("SAMPLE IMAGE PATHS (showing prefix removal)")
-    print("="*80)
-    for img in result['image'].head(3):
-        print(f"  {img}")
-    
     # Show traveler x-coordinate distribution for debugging
     print("\n" + "="*80)
     print("TRAVELER NAME X-COORDINATE DISTRIBUTION (sample)")
     print("="*80)
-    traveler_cols = ['image', 'traveler_count', 'traveler_left', 'traveler_right', 
+    traveler_cols = ['Page_ID', 'traveler_count', 'traveler_left', 'traveler_right', 
                      'traveler_x_min', 'traveler_x_max', 'traveler_x_mean']
     available_cols = [col for col in traveler_cols if col in result.columns]
     if available_cols:
@@ -387,7 +368,7 @@ if __name__ == "__main__":
         if left_col in result.columns and right_col in result.columns:
             total_left = result[left_col].sum()
             total_right = result[right_col].sum()
-            method = "CLUSTERING" if prefix == 'traveler' else "SIMPLE (50%)"
+            method = "GAP DETECTION" if prefix == 'traveler' else "SIMPLE (50%)"
             print(f"\n{prefix.replace('_', ' ').title()} [{method}]:")
             print(f"  Left side:  {total_left}")
             print(f"  Right side: {total_right}")
