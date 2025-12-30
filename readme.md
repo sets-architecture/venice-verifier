@@ -2,7 +2,7 @@
 
 To use the app to verify data, do the following:
 
-1. Go to [venice-verifier.streamlit.app](venice-verifier.streamlit.app)
+1. Go to [https://venice-verifier.streamlit.app](venice-verifier.streamlit.app)
 2. When the app loads it will ask you to add your gcs_key (drag it into the left sidebar)
 3. Make any notes in the notes field.
 4. Check the box at the top when the data is verified/completed
