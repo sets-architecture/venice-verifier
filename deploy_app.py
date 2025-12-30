@@ -21,16 +21,20 @@ st.set_page_config(layout="wide", page_title="Venice Verifier")
 # AUTHENTICATION
 # ==========================================
 st.sidebar.title("Login")
-uploaded_key = st.sidebar.file_uploader("Upload Service Account JSON", type='json')
+uploaded_key = st.sidebar.file_uploader("1. Upload GCS JSON Key", type='json')
 
 if not uploaded_key:
-    st.warning("Please upload a Google Cloud JSON key to proceed.")
+    st.info("Please upload your Google Cloud JSON key to authenticate.")
     st.stop()
 
 # Initialize GCS Client
-key_data = json.load(uploaded_key)
-credentials = service_account.Credentials.from_service_account_info(key_data)
-client = storage.Client(credentials=credentials)
+try:
+    key_data = json.load(uploaded_key)
+    credentials = service_account.Credentials.from_service_account_info(key_data)
+    client = storage.Client(credentials=credentials)
+except Exception as e:
+    st.error(f"Invalid Key File: {e}")
+    st.stop()
 
 # ==========================================
 # HELPER FUNCTIONS
@@ -69,39 +73,47 @@ def load_image_from_gcs(blob_name):
         return None
 
 # ==========================================
-# APP STATE INITIALIZATION
+# APP STATE & DATA LOADING
 # ==========================================
 if 'df' not in st.session_state:
+    # 1. Try GCS (Primary)
     df = load_csv_from_gcs()
     
-    # Fallback for local testing
+    # 2. Try Local Repo (Fallback)
     if df is None:
         if os.path.exists(CSV_FILENAME):
             df = pd.read_csv(CSV_FILENAME)
+            st.toast("Loaded data from local repository.", icon="📂")
+    
+    # 3. Manual Upload (Final Fallback)
+    if df is None:
+        st.warning(f"Could not find '{CSV_FILENAME}' in Google Cloud OR in the GitHub Repo.")
+        uploaded_csv = st.file_uploader("2. Upload your Data CSV to initialize", type='csv')
+        if uploaded_csv:
+            df = pd.read_csv(uploaded_csv)
+            # Autosave to cloud so we don't need to do this again
+            save_csv_to_gcs(df)
+            st.rerun() # Refresh to load it properly
         else:
-            st.error("No CSV found. Please upload 'aggregated_results.csv' to your bucket.")
             st.stop()
 
-    # --- CRITICAL FIX: TYPE CONVERSION ---
-    # Ensure Notes and Text columns are Strings, not Floats (NaN)
-    
-    # 1. Normalize Page_ID
+    # --- TYPE SAFETY FIX ---
+    # Ensure all object columns are strings to prevent 'Notes' float crash
     if 'page_id' in df.columns:
         df.rename(columns={'page_id': 'Page_ID'}, inplace=True)
 
-    # 2. Ensure Metadata columns exist
     if 'Verification_Status' not in df.columns:
         df.insert(0, 'Verification_Status', False)
     if 'Notes' not in df.columns:
         df.insert(1, 'Notes', "")
 
-    # 3. FORCE STRING TYPES (Fixes the crash)
-    # Convert 'Notes' explicitly to string, replacing NaNs with empty string
-    df['Notes'] = df['Notes'].fillna("").astype(str)
-    
-    # Convert any other object columns to string to be safe
-    for col in df.select_dtypes(include=['object']).columns:
-        df[col] = df[col].fillna("").astype(str)
+    # Convert everything to string (except Status) to handle NaNs safely
+    for col in df.columns:
+        if col != 'Verification_Status':
+            df[col] = df[col].fillna("").astype(str)
+            
+    # Convert Status back to bool just in case
+    df['Verification_Status'] = df['Verification_Status'].replace({'True': True, 'False': False}).astype(bool)
 
     st.session_state['df'] = df
     st.session_state.page_index = 0
@@ -124,7 +136,6 @@ c1, c2 = st.sidebar.columns(2)
 c1.button("⬅️ Previous", on_click=prev_page)
 c2.button("Next ➡️", on_click=next_page)
 
-# Dropdown (Synced with Index)
 selected_page = st.sidebar.selectbox(
     "Jump to Image", 
     unique_pages, 
@@ -139,7 +150,7 @@ if selected_page != unique_pages[st.session_state.page_index]:
 # ==========================================
 col_img, col_data = st.columns([1.2, 0.8])
 
-# --- LEFT COLUMN: ZOOMABLE IMAGE ---
+# --- LEFT: ZOOMABLE IMAGE ---
 with col_img:
     st.subheader(f"📄 {selected_page}")
     
@@ -151,39 +162,31 @@ with col_img:
     
     if img_bytes:
         pil_image = Image.open(img_bytes)
-        
-        # Plotly Figure for Zoom/Pan
         fig = px.imshow(pil_image)
         fig.update_layout(
-            width=None, 
-            height=800, 
-            margin=dict(l=0, r=0, b=0, t=0),
-            xaxis={'visible': False, 'showticklabels': False},
-            yaxis={'visible': False, 'showticklabels': False},
-            dragmode='pan',
-            hovermode=False
+            width=None, height=800, margin=dict(l=0, r=0, b=0, t=0),
+            xaxis={'visible': False}, yaxis={'visible': False},
+            dragmode='pan', hovermode=False
         )
-        # Use st.plotly_chart (use_container_width is still correct here)
         st.plotly_chart(fig, use_container_width=True)
         st.caption("🔍 Scroll to Zoom | Click & Drag to Pan | Double-click to Reset")
     else:
         st.error(f"Image not found: {blob_path}")
 
-# --- RIGHT COLUMN: VERTICAL DATA EDITOR ---
+# --- RIGHT: VERTICAL EDITOR ---
 with col_data:
     st.subheader("📝 Verification")
     
     page_mask = df['Page_ID'] == selected_page
     row_data = df.loc[page_mask]
 
-    # 1. Metadata Controls
+    # Metadata
     verified_val = row_data['Verification_Status'].values[0]
     notes_val = row_data['Notes'].values[0]
 
-    new_verified = st.checkbox("✅ Mark Page as Verified", value=bool(verified_val))
-    new_notes = st.text_area("Notes / Issues", value=str(notes_val))
+    new_verified = st.checkbox("✅ Mark Verified", value=bool(verified_val))
+    new_notes = st.text_area("Notes", value=str(notes_val))
 
-    # Update Metadata
     if new_verified != verified_val or new_notes != notes_val:
         df.loc[page_mask, 'Verification_Status'] = new_verified
         df.loc[page_mask, 'Notes'] = new_notes
@@ -191,7 +194,7 @@ with col_data:
 
     st.divider()
 
-    # 2. Transpose for Vertical List
+    # Transpose
     cols_to_exclude = ['Page_ID', 'Verification_Status', 'Notes']
     editable_cols = [c for c in df.columns if c not in cols_to_exclude]
     
@@ -200,33 +203,30 @@ with col_data:
     vertical_df.index.name = 'Field'
     vertical_df = vertical_df.reset_index()
 
-    # 3. Render Editor (Using width="stretch" to fix warning)
+    # Editor
     edited_vertical = st.data_editor(
         vertical_df,
         key="v_editor",
         height=650, 
         hide_index=True,
-        width="stretch", # Replaces use_container_width=True
+        width="stretch",
         column_config={
             "Field": st.column_config.TextColumn("Field", disabled=True),
             "Value": st.column_config.TextColumn("Value") 
         }
     )
 
-    # 4. Save List Changes
+    # Save List Changes
     if not edited_vertical.equals(vertical_df):
         updated_values = dict(zip(edited_vertical['Field'], edited_vertical['Value']))
         for col, val in updated_values.items():
             df.loc[page_mask, col] = val
         st.session_state['df'] = df
 
-    # 5. Global Save Button
     st.write("---")
     if st.button("💾 Save Changes to Cloud", type="primary"):
         save_csv_to_gcs(df)
 
-    # Progress Bar
     verified_count = df['Verification_Status'].sum()
-    total = len(df)
-    st.progress(verified_count / total)
-    st.caption(f"Verified: {verified_count} / {total}")
+    st.progress(verified_count / len(df))
+    st.caption(f"Verified: {verified_count} / {len(df)}")
