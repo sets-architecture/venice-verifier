@@ -15,7 +15,7 @@ BUCKET_NAME = 'venice_singlepages_37'
 BUCKET_PREFIX = "" 
 CSV_FILENAME = 'aggregated_results.csv' 
 
-st.set_page_config(layout="wide", page_title="Venice Verifier (Zoom)")
+st.set_page_config(layout="wide", page_title="Venice Verifier")
 
 # ==========================================
 # AUTHENTICATION
@@ -74,7 +74,7 @@ def load_image_from_gcs(blob_name):
 if 'df' not in st.session_state:
     df = load_csv_from_gcs()
     
-    # Fallback for local testing if GCS fails or file missing
+    # Fallback for local testing
     if df is None:
         if os.path.exists(CSV_FILENAME):
             df = pd.read_csv(CSV_FILENAME)
@@ -82,15 +82,26 @@ if 'df' not in st.session_state:
             st.error("No CSV found. Please upload 'aggregated_results.csv' to your bucket.")
             st.stop()
 
-    # Column Normalization (page_id -> Page_ID)
+    # --- CRITICAL FIX: TYPE CONVERSION ---
+    # Ensure Notes and Text columns are Strings, not Floats (NaN)
+    
+    # 1. Normalize Page_ID
     if 'page_id' in df.columns:
         df.rename(columns={'page_id': 'Page_ID'}, inplace=True)
 
-    # Ensure Metadata columns exist
+    # 2. Ensure Metadata columns exist
     if 'Verification_Status' not in df.columns:
         df.insert(0, 'Verification_Status', False)
     if 'Notes' not in df.columns:
         df.insert(1, 'Notes', "")
+
+    # 3. FORCE STRING TYPES (Fixes the crash)
+    # Convert 'Notes' explicitly to string, replacing NaNs with empty string
+    df['Notes'] = df['Notes'].fillna("").astype(str)
+    
+    # Convert any other object columns to string to be safe
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].fillna("").astype(str)
 
     st.session_state['df'] = df
     st.session_state.page_index = 0
@@ -126,13 +137,12 @@ if selected_page != unique_pages[st.session_state.page_index]:
 # ==========================================
 # MAIN INTERFACE
 # ==========================================
-col_img, col_data = st.columns([1.2, 0.8]) # Image slightly wider
+col_img, col_data = st.columns([1.2, 0.8])
 
 # --- LEFT COLUMN: ZOOMABLE IMAGE ---
 with col_img:
     st.subheader(f"📄 {selected_page}")
     
-    # Clean up filename for GCS path
     clean_name = selected_page.replace("gs://", "").split("/")[-1]
     blob_path = f"{BUCKET_PREFIX}/{clean_name}".replace("//", "/")
     if blob_path.startswith("/"): blob_path = blob_path[1:]
@@ -140,23 +150,20 @@ with col_img:
     img_bytes = load_image_from_gcs(blob_path)
     
     if img_bytes:
-        # Load into PIL
         pil_image = Image.open(img_bytes)
         
-        # Create Plotly Figure
+        # Plotly Figure for Zoom/Pan
         fig = px.imshow(pil_image)
-        
-        # Configure Layout for Zoom/Pan
         fig.update_layout(
             width=None, 
-            height=800, # Tall enough to see full page
+            height=800, 
             margin=dict(l=0, r=0, b=0, t=0),
             xaxis={'visible': False, 'showticklabels': False},
             yaxis={'visible': False, 'showticklabels': False},
-            dragmode='pan', # Default tool is Hand (Pan)
-            hovermode=False # Disable tooltips for cleaner view
+            dragmode='pan',
+            hovermode=False
         )
-        
+        # Use st.plotly_chart (use_container_width is still correct here)
         st.plotly_chart(fig, use_container_width=True)
         st.caption("🔍 Scroll to Zoom | Click & Drag to Pan | Double-click to Reset")
     else:
@@ -166,18 +173,17 @@ with col_img:
 with col_data:
     st.subheader("📝 Verification")
     
-    # Filter row
     page_mask = df['Page_ID'] == selected_page
     row_data = df.loc[page_mask]
 
-    # 1. Metadata Controls (Top)
+    # 1. Metadata Controls
     verified_val = row_data['Verification_Status'].values[0]
     notes_val = row_data['Notes'].values[0]
 
     new_verified = st.checkbox("✅ Mark Page as Verified", value=bool(verified_val))
-    new_notes = st.text_area("Notes / Issues", value=str(notes_val) if pd.notna(notes_val) else "")
+    new_notes = st.text_area("Notes / Issues", value=str(notes_val))
 
-    # Update Metadata immediately
+    # Update Metadata
     if new_verified != verified_val or new_notes != notes_val:
         df.loc[page_mask, 'Verification_Status'] = new_verified
         df.loc[page_mask, 'Notes'] = new_notes
@@ -194,20 +200,20 @@ with col_data:
     vertical_df.index.name = 'Field'
     vertical_df = vertical_df.reset_index()
 
-    # 3. Render Editor
+    # 3. Render Editor (Using width="stretch" to fix warning)
     edited_vertical = st.data_editor(
         vertical_df,
         key="v_editor",
         height=650, 
         hide_index=True,
-        use_container_width=True,
+        width="stretch", # Replaces use_container_width=True
         column_config={
             "Field": st.column_config.TextColumn("Field", disabled=True),
             "Value": st.column_config.TextColumn("Value") 
         }
     )
 
-    # 4. Save List Changes (Inverse Transpose)
+    # 4. Save List Changes
     if not edited_vertical.equals(vertical_df):
         updated_values = dict(zip(edited_vertical['Field'], edited_vertical['Value']))
         for col, val in updated_values.items():
