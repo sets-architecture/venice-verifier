@@ -13,7 +13,8 @@ from PIL import Image
 # ==========================================
 BUCKET_NAME = 'venice_singlepages_37' 
 BUCKET_PREFIX = "" 
-CSV_FILENAME = 'aggregated_results.csv' 
+# CSV_FILENAME = 'aggregated_results.csv' 
+CSV_FILENAME = 'aggregated_annotations_claude.csv' 
 
 st.set_page_config(layout="wide", page_title="Venice Verifier")
 
