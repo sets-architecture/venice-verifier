@@ -1,6 +1,8 @@
 import pandas as pd
 import json
 import os
+import re
+from difflib import SequenceMatcher
 
 def parse_bounding_boxes(bbox_string):
     """Parse the bounding box JSON string and return list of boxes with labels."""
@@ -146,6 +148,185 @@ def extract_year_from_date(date_string):
         return match.group(1)
     return None
 
+def fuzzy_match(word, keywords, threshold=0.8):
+    """
+    Check if a word matches any keyword with fuzzy matching.
+    Returns the matched keyword if similarity >= threshold, None otherwise.
+    """
+    word = word.lower().strip()
+    for keyword in keywords:
+        similarity = SequenceMatcher(None, word, keyword).ratio()
+        if similarity >= threshold:
+            return keyword
+    return None
+
+def parse_unnamed_traveler_count(text):
+    """
+    Parse Italian text to count unnamed travelers using fuzzy matching.
+    
+    Logic:
+    1. Check if text contains a person-related keyword (with fuzzy matching)
+    2. Extract number word if present
+    3. Return count: number found if present, else 1 if keyword found, else 0
+    
+    Examples:
+    - "con tre figli" → 3 (keyword found + number found)
+    - "e moglie" → 1 (keyword found + no number)
+    - "con valigia" → 0 (no keyword found)
+    - "mogle" → 1 (fuzzy matches "moglie")
+    """
+    if not text or pd.isna(text):
+        return 0
+    
+    text_lower = str(text).lower().strip()
+    
+    # Person-related keywords (Italian)
+    person_keywords = [
+        # Spouse/partner
+        'moglie', 'consorte', 'marito', 'sposo', 'sposa',
+        # Children
+        'figlio', 'figlia', 'figliuolo', 'figliuola', 'figli', 'figliuoli', 'figliuole',
+        'bambino', 'bambina', 'bambini',
+        # Family members
+        'madre', 'padre', 'fratello', 'sorella', 'fratelli', 'sorelle',
+        'nonno', 'nonna', 'nipote', 'nipoti', 'cugino', 'cugina',
+        # Servants/staff
+        'domestico', 'domestica', 'domestici', 'domestiche',
+        'servo', 'serva', 'servi', 'serve',
+        'servitore', 'servitrice', 'servitori', 'servitrici',
+        'cameriere', 'cameriera',
+        # Companions
+        'compagno', 'compagna', 'compagni', 'compagne',
+        'accompagnatore', 'accompagnatrice',
+        # General
+        'persona', 'persone', 'gente', 'famiglia', 'famiglie',
+        'individuo', 'individui'
+    ]
+    
+    # Italian number words mapping
+    number_words = {
+        'un': 1, 'una': 1, 'uno': 1,
+        'due': 2,
+        'tre': 3,
+        'quattro': 4,
+        'cinque': 5,
+        'sei': 6,
+        'sette': 7,
+        'otto': 8,
+        'nove': 9,
+        'dieci': 10,
+        'undici': 11,
+        'dodici': 12,
+        'tredici': 13,
+        'quattordici': 14,
+        'quindici': 15
+    }
+    
+    # Split text into words
+    words = re.findall(r'\b\w+\b', text_lower)
+    
+    # Check for person keywords using fuzzy matching
+    keyword_found = False
+    for word in words:
+        if fuzzy_match(word, person_keywords, threshold=0.8):
+            keyword_found = True
+            break
+    
+    # If no person keyword found, return 0
+    if not keyword_found:
+        return 0
+    
+    # Look for number words
+    for word in words:
+        if word in number_words:
+            return number_words[word]
+    
+    # Look for digit at start of text
+    digit_match = re.search(r'\b(\d+)\b', text_lower)
+    if digit_match:
+        return int(digit_match.group(1))
+    
+    # Keyword found but no number specified = 1 person
+    return 1
+
+def separate_con_e_text_with_boxes(boxes, text_list):
+    """
+    Separate the following text based on whether it comes after 'con' or 'e/ed/eed',
+    and also track which column each text belongs to.
+    
+    Args:
+        boxes: List of bounding box dictionaries
+        text_list: List of text strings following con/e
+    
+    Returns:
+        (con_data, e_data) where each is a list of (text, side) tuples
+    """
+    if not text_list or len(text_list) == 0:
+        return [], []
+    
+    con_boxes = []
+    e_boxes = []
+    
+    for box in boxes:
+        if 'rectanglelabels' not in box:
+            continue
+        if 'con' in box['rectanglelabels']:
+            side = calculate_side_simple(box['x'], box['width']) if 'x' in box and 'width' in box else 'unknown'
+            con_boxes.append((box, side))
+        elif any(label in ['e', 'ed', 'eed'] for label in box['rectanglelabels']):
+            side = calculate_side_simple(box['x'], box['width']) if 'x' in box and 'width' in box else 'unknown'
+            e_boxes.append((box, side))
+    
+    # Pair texts with boxes
+    con_data = []
+    e_data = []
+    
+    con_count = len(con_boxes)
+    
+    for i, text in enumerate(text_list):
+        if i < con_count:
+            side = con_boxes[i][1]
+            con_data.append((text, side))
+        else:
+            e_index = i - con_count
+            if e_index < len(e_boxes):
+                side = e_boxes[e_index][1]
+                e_data.append((text, side))
+    
+    return con_data, e_data
+
+def count_unnamed_travelers_by_column(con_data, e_data):
+    """
+    Count unnamed travelers by column from con and e text data.
+    
+    Args:
+        con_data: List of (text, side) tuples for con
+        e_data: List of (text, side) tuples for e
+    
+    Returns:
+        (left_count, right_count, total_count)
+    """
+    left_count = 0
+    right_count = 0
+    
+    # Count from con data
+    for text, side in con_data:
+        count = parse_unnamed_traveler_count(text)
+        if side == 'left':
+            left_count += count
+        elif side == 'right':
+            right_count += count
+    
+    # Count from e data
+    for text, side in e_data:
+        count = parse_unnamed_traveler_count(text)
+        if side == 'left':
+            left_count += count
+        elif side == 'right':
+            right_count += count
+    
+    return left_count, right_count, left_count + right_count
+
 def process_annotations(csv_files):
     """
     Process all CSV files and aggregate data by image filename.
@@ -179,7 +360,6 @@ def process_annotations(csv_files):
     
     for image in images:
         image_data = {
-            'Page_ID': image,
             'image_filename': os.path.basename(image)
         }
         
@@ -218,7 +398,6 @@ def process_annotations(csv_files):
                                  and 'Archivist mark' in box['rectanglelabels']]
                 
                 image_data['is_signed'] = 'Y' if len(signatures) > 0 else 'N'
-                image_data['signature_count'] = len(signatures)
                 
                 # Determine signature location(s)
                 if len(signatures) > 0:
@@ -237,7 +416,6 @@ def process_annotations(csv_files):
                                  and mark['y'] < 10 and mark['x'] < 20]
                 
                 image_data['has_top_left_mark'] = 'Y' if len(top_left_marks) > 0 else 'N'
-                image_data['top_left_mark_count'] = len(top_left_marks)
                 image_data['additional_archivist_marks_count'] = max(0, len(archivist_marks) - len(top_left_marks))
                 image_data['total_archivist_marks_count'] = len(archivist_marks)
         
@@ -264,19 +442,15 @@ def process_annotations(csv_files):
                         try:
                             name_list = json.loads(names) if isinstance(names, str) else names
                             image_data['quondam_names'] = ' | '.join(name_list) if isinstance(name_list, list) else str(name_list)
-                            image_data['quondam_names_count'] = len(name_list) if isinstance(name_list, list) else 0
                         except:
                             image_data['quondam_names'] = str(names)
-                            image_data['quondam_names_count'] = 0
                     else:
                         image_data['quondam_names'] = ''
-                        image_data['quondam_names_count'] = 0
                 else:
                     image_data['quondam_names'] = ''
-                    image_data['quondam_names_count'] = 0
         
         # ===================================================================
-        # CON AND E
+        # CON AND E - SEPARATED WITH UNNAMED TRAVELER COUNTS
         # ===================================================================
         if 'con_e' in dataframes:
             df = dataframes['con_e']
@@ -305,20 +479,46 @@ def process_annotations(csv_files):
                 image_data['e_conjunction_left'] = left_e
                 image_data['e_conjunction_right'] = right_e
                 
-                # Extract text after con/e
+                # Extract and SEPARATE text after con/e, AND COUNT UNNAMED TRAVELERS
                 if 'text-after-con-e-ed' in row.columns:
                     text_data = row.iloc[0]['text-after-con-e-ed']
                     if pd.notna(text_data):
                         try:
                             texts = json.loads(text_data) if isinstance(text_data, str) else text_data
-                            image_data['con_e_following_text'] = ' | '.join(texts) if isinstance(texts, list) else str(texts)
-                            image_data['con_e_following_text_count'] = len(texts) if isinstance(texts, list) else 0
-                        except:
-                            image_data['con_e_following_text'] = str(text_data)
-                            image_data['con_e_following_text_count'] = 0
+                            if isinstance(texts, list):
+                                con_data, e_data = separate_con_e_text_with_boxes(boxes, texts)
+                                
+                                # Store text
+                                con_texts = [text for text, side in con_data]
+                                e_texts = [text for text, side in e_data]
+                                
+                                image_data['text_after_con'] = ' | '.join(con_texts) if con_texts else ''
+                                image_data['text_after_e'] = ' | '.join(e_texts) if e_texts else ''
+                                
+                                # Count unnamed travelers by column using fuzzy matching
+                                left_unnamed, right_unnamed, total_unnamed = count_unnamed_travelers_by_column(con_data, e_data)
+                                image_data['unnamed_travelers_left'] = left_unnamed
+                                image_data['unnamed_travelers_right'] = right_unnamed
+                                image_data['unnamed_travelers_total'] = total_unnamed
+                            else:
+                                image_data['text_after_con'] = str(texts)
+                                image_data['text_after_e'] = ''
+                                image_data['unnamed_travelers_left'] = 0
+                                image_data['unnamed_travelers_right'] = 0
+                                image_data['unnamed_travelers_total'] = 0
+                        except Exception as e:
+                            print(f"Error processing con/e text for {image}: {e}")
+                            image_data['text_after_con'] = str(text_data)
+                            image_data['text_after_e'] = ''
+                            image_data['unnamed_travelers_left'] = 0
+                            image_data['unnamed_travelers_right'] = 0
+                            image_data['unnamed_travelers_total'] = 0
                     else:
-                        image_data['con_e_following_text'] = ''
-                        image_data['con_e_following_text_count'] = 0
+                        image_data['text_after_con'] = ''
+                        image_data['text_after_e'] = ''
+                        image_data['unnamed_travelers_left'] = 0
+                        image_data['unnamed_travelers_right'] = 0
+                        image_data['unnamed_travelers_total'] = 0
         
         # ===================================================================
         # TRAVELERS
@@ -347,12 +547,10 @@ def process_annotations(csv_files):
                 image_data['place_of_origin_left'] = left
                 image_data['place_of_origin_right'] = right
                 
-                # Get all label types present
-                all_labels = []
-                for box in boxes:
-                    if 'rectanglelabels' in box:
-                        all_labels.extend(box['rectanglelabels'])
-                image_data['traveler_label_types'] = ', '.join(set(all_labels))
+                # Manual entry fields for unique places only
+                image_data['unique_places_of_origin_nationality'] = ''
+                image_data['unique_places_of_stay'] = ''
+                image_data['place_of_stay_with_person_name'] = ''
         
         # ===================================================================
         # CURLY BRACKETS
@@ -375,30 +573,66 @@ def process_annotations(csv_files):
                                   if 'rectanglelabels' in box 
                                   and 'bracket annotation' in box['rectanglelabels']]
                 
-                image_data['bracket_annotation_count'] = len(annotation_boxes)
                 image_data['has_bracket_annotation'] = 'Y' if len(annotation_boxes) > 0 else 'N'
-                
-                # Count contained items
-                contained_boxes = [box for box in boxes 
-                                 if 'rectanglelabels' in box 
-                                 and 'contained by bracket' in box['rectanglelabels']]
-                image_data['bracket_contained_count'] = len(contained_boxes)
                 
                 # Get annotation text
                 bracket_text = row.iloc[0]['bracket_annotation_text']
                 image_data['bracket_annotation_text'] = bracket_text if pd.notna(bracket_text) else ''
-                
-                # Get all label types present
-                all_labels = []
-                for box in boxes:
-                    if 'rectanglelabels' in box:
-                        all_labels.extend(box['rectanglelabels'])
-                image_data['bracket_label_types'] = ', '.join(set(all_labels))
         
         aggregated_data.append(image_data)
     
     # Create final dataframe
     result_df = pd.DataFrame(aggregated_data)
+    
+    # Reorder columns in the exact order specified
+    column_order = [
+        'image_filename',
+        'has_date',
+        'date_full_text',
+        'date_year_extracted',
+        'has_two_columns',
+        'is_signed',
+        'signature_location',
+        'has_top_left_mark',
+        'additional_archivist_marks_count',
+        'total_archivist_marks_count',
+        'quondam_total',
+        'quondam_left',
+        'quondam_right',
+        'quondam_names',
+        'con_total',
+        'con_left',
+        'con_right',
+        'text_after_con',
+        'e_conjunction_total',
+        'e_conjunction_left',
+        'e_conjunction_right',
+        'text_after_e',
+        'named_travelers_total',
+        'named_travelers_left',
+        'named_travelers_right',
+        'unnamed_travelers_total',
+        'unnamed_travelers_left',
+        'unnamed_travelers_right',
+        'place_of_origin_total',
+        'place_of_origin_left',
+        'place_of_origin_right',
+        'unique_places_of_origin_nationality',
+        'place_of_stay_total',
+        'place_of_stay_left',
+        'place_of_stay_right',
+        'unique_places_of_stay',
+        'place_of_stay_with_person_name',
+        'bracket_total',
+        'bracket_left',
+        'bracket_right',
+        'has_bracket_annotation',
+        'bracket_annotation_text'
+    ]
+    
+    # Only include columns that exist
+    column_order = [col for col in column_order if col in result_df.columns]
+    result_df = result_df[column_order]
     
     return result_df
 
@@ -440,9 +674,18 @@ if __name__ == "__main__":
     result.to_csv(output_file, index=False)
     print(f"\n✓ Results saved to: {output_file}")
     
+    # Display what needs manual entry
+    print("\n" + "="*80)
+    print("FIELDS REQUIRING MANUAL ENTRY")
+    print("="*80)
+    print("\nThe following columns have been created for manual data entry:")
+    print("  - unique_places_of_origin_nationality")
+    print("  - unique_places_of_stay")
+    print("  - place_of_stay_with_person_name")
+    
     # Display comprehensive summary
     print("\n" + "="*80)
-    print("COMPREHENSIVE SUMMARY")
+    print("DATA SUMMARY")
     print("="*80)
     
     print("\n--- DATE AND COLUMNS ---")
@@ -451,7 +694,6 @@ if __name__ == "__main__":
     
     print("\n--- SIGNATURES AND MARKS ---")
     print(f"Pages that are signed: {result['is_signed'].value_counts().get('Y', 0)}")
-    print(f"Total signatures: {result['signature_count'].sum()}")
     print(f"Pages with top-left archivist mark: {result['has_top_left_mark'].value_counts().get('Y', 0)}")
     print(f"Total archivist marks: {result['total_archivist_marks_count'].sum()}")
     
@@ -459,7 +701,6 @@ if __name__ == "__main__":
     print(f"Total quondam instances: {result['quondam_total'].sum()}")
     print(f"  - Left column: {result['quondam_left'].sum()}")
     print(f"  - Right column: {result['quondam_right'].sum()}")
-    print(f"Total names after quondam: {result['quondam_names_count'].sum()}")
     
     print("\n--- CON AND E ---")
     print(f"Total 'con' instances: {result['con_total'].sum()}")
@@ -473,17 +714,18 @@ if __name__ == "__main__":
     print(f"Total named travelers: {result['named_travelers_total'].sum()}")
     print(f"  - Left column: {result['named_travelers_left'].sum()}")
     print(f"  - Right column: {result['named_travelers_right'].sum()}")
-    print(f"Total places of stay: {result['place_of_stay_total'].sum()}")
-    print(f"  - Left column: {result['place_of_stay_left'].sum()}")
-    print(f"  - Right column: {result['place_of_stay_right'].sum()}")
+    print(f"Total unnamed travelers: {result['unnamed_travelers_total'].sum()}")
+    print(f"  - Left column: {result['unnamed_travelers_left'].sum()}")
+    print(f"  - Right column: {result['unnamed_travelers_right'].sum()}")
     print(f"Total places of origin: {result['place_of_origin_total'].sum()}")
     print(f"  - Left column: {result['place_of_origin_left'].sum()}")
     print(f"  - Right column: {result['place_of_origin_right'].sum()}")
+    print(f"Total places of stay: {result['place_of_stay_total'].sum()}")
+    print(f"  - Left column: {result['place_of_stay_left'].sum()}")
+    print(f"  - Right column: {result['place_of_stay_right'].sum()}")
     
     print("\n--- BRACKETS ---")
     print(f"Total brackets: {result['bracket_total'].sum()}")
     print(f"  - Left column: {result['bracket_left'].sum()}")
     print(f"  - Right column: {result['bracket_right'].sum()}")
     print(f"Brackets with annotations: {result['has_bracket_annotation'].value_counts().get('Y', 0)}")
-    print(f"Total bracket annotations: {result['bracket_annotation_count'].sum()}")
-    print(f"Total contained by bracket: {result['bracket_contained_count'].sum()}")
