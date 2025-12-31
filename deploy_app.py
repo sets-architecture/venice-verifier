@@ -13,7 +13,7 @@ from PIL import Image, ImageOps  # <--- NEW IMPORT
 # ==========================================
 BUCKET_NAME = 'venice_singlepages_37' 
 BUCKET_PREFIX = "" 
-CSV_FILENAME = 'aggregate_venice_claude.csv' 
+CSV_FILENAME = 'aggregated_annotations_claude.csv' 
 
 st.set_page_config(layout="wide", page_title="Venice Verifier")
 
