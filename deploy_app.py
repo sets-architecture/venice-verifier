@@ -48,11 +48,12 @@ def clean_and_prep_dataframe(df):
     df.columns = df.columns.str.strip()
 
     # 2. Smart Renaming: Look for various ID column names
-    # Priority: Page_ID -> page_id -> image -> filename
     col_map = {c.lower(): c for c in df.columns}
     
     if 'page_id' not in df.columns: # If not already correct
-        if 'page_id' in col_map:
+        if 'image_filename' in col_map:  # <--- FIXED HERE
+            df.rename(columns={col_map['image_filename']: 'Page_ID'}, inplace=True)
+        elif 'page_id' in col_map:
             df.rename(columns={col_map['page_id']: 'Page_ID'}, inplace=True)
         elif 'image' in col_map:
             df.rename(columns={col_map['image']: 'Page_ID'}, inplace=True)
@@ -150,7 +151,7 @@ if 'df' not in st.session_state:
 
     # --- FINAL SAFETY CHECK ---
     if 'Page_ID' not in df.columns:
-        st.error(f"CRITICAL ERROR: Could not find 'Page_ID' column in CSV. Found columns: {list(df.columns)}")
+        st.error(f"CRITICAL ERROR: Could not find 'Page_ID' or 'image_filename' column in CSV. Found columns: {list(df.columns)}")
         st.stop()
 
     st.session_state['df'] = df
@@ -257,7 +258,6 @@ with col_data:
 
     if view_mode == "Compact Grid":
         # GRID MODE
-        # width="stretch" fixes the warning
         edited_vertical = st.data_editor(
             vertical_df,
             key="v_editor",
