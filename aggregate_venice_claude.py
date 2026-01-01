@@ -160,20 +160,22 @@ def fuzzy_match(word, keywords, threshold=0.8):
             return keyword
     return None
 
-def parse_unnamed_traveler_count(text):
+def parse_unnamed_travelers_in_text(text):
     """
-    Parse Italian text to count unnamed travelers using fuzzy matching.
+    Parse Italian text to count ALL unnamed travelers mentioned in a single text entry.
+    This handles entries like "moglie, una figliuola" which should count as 2 people.
     
-    Logic:
-    1. Check if text contains a person-related keyword (with fuzzy matching)
-    2. Extract number word if present
-    3. Return count: number found if present, else 1 if keyword found, else 0
+    The function:
+    1. Splits text by commas and common separators
+    2. Counts people in each phrase
+    3. Returns total count for the entire text entry
     
     Examples:
-    - "con tre figli" → 3 (keyword found + number found)
-    - "e moglie" → 1 (keyword found + no number)
-    - "con valigia" → 0 (no keyword found)
-    - "mogle" → 1 (fuzzy matches "moglie")
+    - "moglie" → 1
+    - "moglie, una figliuola" → 2 (moglie=1 + una figliuola=1)
+    - "tre figli" → 3
+    - "due domestici" → 2
+    - "con valigia" → 0 (no person keywords)
     """
     if not text or pd.isna(text):
         return 0
@@ -222,32 +224,51 @@ def parse_unnamed_traveler_count(text):
         'quindici': 15
     }
     
-    # Split text into words
-    words = re.findall(r'\b\w+\b', text_lower)
+    # Split by common separators (comma, semicolon, "e", "ed")
+    # But be careful not to split on "e" that's part of a word
+    phrases = re.split(r'[,;]|\se\s|\sed\s', text_lower)
     
-    # Check for person keywords using fuzzy matching
-    keyword_found = False
-    for word in words:
-        if fuzzy_match(word, person_keywords, threshold=0.8):
-            keyword_found = True
-            break
+    total_count = 0
     
-    # If no person keyword found, return 0
-    if not keyword_found:
-        return 0
+    for phrase in phrases:
+        phrase = phrase.strip()
+        if not phrase:
+            continue
+        
+        # Split phrase into words
+        words = re.findall(r'\b\w+\b', phrase)
+        
+        # Check for person keywords using fuzzy matching
+        keyword_found = False
+        for word in words:
+            if fuzzy_match(word, person_keywords, threshold=0.8):
+                keyword_found = True
+                break
+        
+        # If no person keyword found in this phrase, skip it
+        if not keyword_found:
+            continue
+        
+        # Look for number words in this phrase
+        phrase_count = None
+        for word in words:
+            if word in number_words:
+                phrase_count = number_words[word]
+                break
+        
+        # If no number word, look for digit
+        if phrase_count is None:
+            digit_match = re.search(r'\b(\d+)\b', phrase)
+            if digit_match:
+                phrase_count = int(digit_match.group(1))
+        
+        # If keyword found but no number, count as 1 person
+        if phrase_count is None:
+            phrase_count = 1
+        
+        total_count += phrase_count
     
-    # Look for number words
-    for word in words:
-        if word in number_words:
-            return number_words[word]
-    
-    # Look for digit at start of text
-    digit_match = re.search(r'\b(\d+)\b', text_lower)
-    if digit_match:
-        return int(digit_match.group(1))
-    
-    # Keyword found but no number specified = 1 person
-    return 1
+    return total_count
 
 def separate_con_e_text_with_boxes(boxes, text_list):
     """
@@ -298,6 +319,7 @@ def separate_con_e_text_with_boxes(boxes, text_list):
 def count_unnamed_travelers_by_column(con_data, e_data):
     """
     Count unnamed travelers by column from con and e text data.
+    Now counts ALL people mentioned within each text entry, not just the number of entries.
     
     Args:
         con_data: List of (text, side) tuples for con
@@ -309,17 +331,17 @@ def count_unnamed_travelers_by_column(con_data, e_data):
     left_count = 0
     right_count = 0
     
-    # Count from con data
+    # Count from con data - parse each text entry for ALL people mentioned
     for text, side in con_data:
-        count = parse_unnamed_traveler_count(text)
+        count = parse_unnamed_travelers_in_text(text)
         if side == 'left':
             left_count += count
         elif side == 'right':
             right_count += count
     
-    # Count from e data
+    # Count from e data - parse each text entry for ALL people mentioned
     for text, side in e_data:
-        count = parse_unnamed_traveler_count(text)
+        count = parse_unnamed_travelers_in_text(text)
         if side == 'left':
             left_count += count
         elif side == 'right':
@@ -458,7 +480,7 @@ def process_annotations(csv_files):
             if not row.empty:
                 boxes = parse_bounding_boxes(row.iloc[0]['con-e-ed'])
                 
-                # Count "con" instances by column
+                # Count "con" instances by column (instances, not people)
                 left, right, total = count_by_label_and_side(boxes, 'con', use_gap_detection=False)
                 image_data['con_total'] = total
                 image_data['con_left'] = left
@@ -469,7 +491,7 @@ def process_annotations(csv_files):
                           if 'rectanglelabels' in box 
                           and any(label in ['e', 'ed', 'eed'] for label in box['rectanglelabels'])]
                 
-                # Count e conjunction by column
+                # Count e conjunction by column (instances, not people)
                 left_e = sum(1 for box in e_boxes 
                            if 'x' in box and 'width' in box 
                            and calculate_side_simple(box['x'], box['width']) == 'left')
@@ -495,7 +517,7 @@ def process_annotations(csv_files):
                                 image_data['text_after_con'] = ' | '.join(con_texts) if con_texts else ''
                                 image_data['text_after_e'] = ' | '.join(e_texts) if e_texts else ''
                                 
-                                # Count unnamed travelers by column using fuzzy matching
+                                # Count unnamed travelers by column - NOW COUNTS ALL PEOPLE IN TEXT
                                 left_unnamed, right_unnamed, total_unnamed = count_unnamed_travelers_by_column(con_data, e_data)
                                 image_data['unnamed_travelers_left'] = left_unnamed
                                 image_data['unnamed_travelers_right'] = right_unnamed
@@ -703,18 +725,18 @@ if __name__ == "__main__":
     print(f"  - Right column: {result['quondam_right'].sum()}")
     
     print("\n--- CON AND E ---")
-    print(f"Total 'con' instances: {result['con_total'].sum()}")
+    print(f"Total 'con' INSTANCES: {result['con_total'].sum()}")
     print(f"  - Left column: {result['con_left'].sum()}")
     print(f"  - Right column: {result['con_right'].sum()}")
-    print(f"Total 'e' conjunction instances: {result['e_conjunction_total'].sum()}")
+    print(f"Total 'e' conjunction INSTANCES: {result['e_conjunction_total'].sum()}")
     print(f"  - Left column: {result['e_conjunction_left'].sum()}")
     print(f"  - Right column: {result['e_conjunction_right'].sum()}")
     
-    print("\n--- TRAVELERS ---")
+    print("\n--- TRAVELERS (People Counted in Text) ---")
     print(f"Total named travelers: {result['named_travelers_total'].sum()}")
     print(f"  - Left column: {result['named_travelers_left'].sum()}")
     print(f"  - Right column: {result['named_travelers_right'].sum()}")
-    print(f"Total unnamed travelers: {result['unnamed_travelers_total'].sum()}")
+    print(f"Total unnamed travelers (PEOPLE counted from text): {result['unnamed_travelers_total'].sum()}")
     print(f"  - Left column: {result['unnamed_travelers_left'].sum()}")
     print(f"  - Right column: {result['unnamed_travelers_right'].sum()}")
     print(f"Total places of origin: {result['place_of_origin_total'].sum()}")
