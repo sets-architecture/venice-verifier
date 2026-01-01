@@ -39,17 +39,40 @@ except Exception as e:
 # ==========================================
 # HELPER FUNCTIONS
 # ==========================================
+
 def clean_and_prep_dataframe(df):
-    if 'page_id' in df.columns:
-        df.rename(columns={'page_id': 'Page_ID'}, inplace=True)
+    """
+    Robust cleaning to prevent KeyErrors and Float crashes.
+    """
+    # 1. Strip whitespace from column headers
+    df.columns = df.columns.str.strip()
+
+    # 2. Smart Renaming: Look for various ID column names
+    # Priority: Page_ID -> page_id -> image -> filename
+    col_map = {c.lower(): c for c in df.columns}
+    
+    if 'page_id' not in df.columns: # If not already correct
+        if 'page_id' in col_map:
+            df.rename(columns={col_map['page_id']: 'Page_ID'}, inplace=True)
+        elif 'image' in col_map:
+            df.rename(columns={col_map['image']: 'Page_ID'}, inplace=True)
+        elif 'filename' in col_map:
+            df.rename(columns={col_map['filename']: 'Page_ID'}, inplace=True)
+
+    # 3. Ensure Metadata columns exist
     if 'Verification_Status' not in df.columns:
         df.insert(0, 'Verification_Status', False)
     if 'Notes' not in df.columns:
         df.insert(1, 'Notes', "")
+
+    # 4. FORCE STRING TYPES (Critical for Streamlit Editor)
     for col in df.columns:
         if col != 'Verification_Status':
             df[col] = df[col].fillna("").astype(str)
+            
+    # 5. Ensure Boolean Type for Status
     df['Verification_Status'] = df['Verification_Status'].replace({'True': True, 'False': False}).astype(bool)
+    
     return df
 
 def load_csv_from_gcs():
@@ -122,7 +145,12 @@ if 'df' not in st.session_state:
                 save_csv_to_gcs(df)
     
     if df is None:
-        st.error("Could not load data.")
+        st.error("Could not load data. Check bucket permissions or GitHub URL.")
+        st.stop()
+
+    # --- FINAL SAFETY CHECK ---
+    if 'Page_ID' not in df.columns:
+        st.error(f"CRITICAL ERROR: Could not find 'Page_ID' column in CSV. Found columns: {list(df.columns)}")
         st.stop()
 
     st.session_state['df'] = df
@@ -224,11 +252,12 @@ with col_data:
     vertical_df.index.name = 'Field'
     vertical_df = vertical_df.reset_index()
 
-    # --- VIEW MODE TOGGLE ---
+    # View Mode Toggle
     view_mode = st.radio("Editor View:", ["Compact Grid", "Expanded Form (Word Wrap)"], horizontal=True)
 
     if view_mode == "Compact Grid":
-        # GRID MODE (Fast, Compact)
+        # GRID MODE
+        # width="stretch" fixes the warning
         edited_vertical = st.data_editor(
             vertical_df,
             key="v_editor",
@@ -240,7 +269,6 @@ with col_data:
                 "Value": st.column_config.TextColumn("Value", width="large")
             }
         )
-        # Save Grid Changes
         if not edited_vertical.equals(vertical_df):
             updated_values = dict(zip(edited_vertical['Field'], edited_vertical['Value']))
             for col, val in updated_values.items():
@@ -248,16 +276,13 @@ with col_data:
             st.session_state['df'] = df
 
     else:
-        # FORM MODE (Full Word Wrap)
+        # FORM MODE
         with st.form("expanded_form"):
             new_values = {}
             for i, row in vertical_df.iterrows():
-                # Text Area allows full word wrap and adjustable height
                 label_txt = row['Field']
                 curr_val = row['Value']
-                # Make text area taller if content is long
                 h = 100 if len(curr_val) > 50 else None 
-                
                 new_val = st.text_area(label=label_txt, value=curr_val, height=h)
                 new_values[label_txt] = new_val
             
@@ -265,7 +290,7 @@ with col_data:
                 for col, val in new_values.items():
                     df.loc[page_mask, col] = val
                 st.session_state['df'] = df
-                st.toast("Changes applied locally. Click 'Save Changes to Cloud' to persist.")
+                st.toast("Changes applied locally.")
                 st.rerun()
 
     st.write("---")
