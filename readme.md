@@ -8,6 +8,8 @@ To use the app to verify data, do the following:
 4. Check the box at the top when the data is verified/completed
 5. Save the revised data to Google Cloud by clicking the button at the bottom.
 
+NOTE: Force update from github will overwrite the dataset being edited. 
+
 ## Summary data for the 39 images
 
 --- DATE AND COLUMNS ---
