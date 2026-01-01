@@ -36,9 +36,9 @@ To use the app to verify data, do the following:
 - Total named travelers: 919
   - Left column: 562
   - Right column: 357
-- Total unnamed travelers: 388
-  - Left column: 264
-  - Right column: 124
+- Total unnamed travelers (PEOPLE counted from text): 391
+  - Left column: 266
+  - Right column: 125
 - - Total places of origin: 689
   - Left column: 420
   - Right column: 269
