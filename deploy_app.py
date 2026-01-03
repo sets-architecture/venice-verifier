@@ -13,7 +13,7 @@ from PIL import Image, ImageOps
 # ==========================================
 BUCKET_NAME = 'venice_singlepages_37' 
 BUCKET_PREFIX = "" 
-CSV_FILENAME = 'aggregated_results.csv' 
+CSV_FILENAME = 'aggregated_annotations_checked.csv' 
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/sets-architecture/venice-verifier/refs/heads/main/aggregated_annotations_claude.csv"
 
 st.set_page_config(layout="wide", page_title="Venice Verifier")
